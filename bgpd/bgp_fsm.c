@@ -1575,8 +1575,8 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 	 *   - bgp_connect_fail: TCP connect refused/timeout
 	 *   - bgp_stop_with_error: NOTIFICATION received
 	 *   - bgp_stop_with_notify: hold-timer expire, etc.
-	 *   - bgp_write_notify → BGP_Stop: Bad Peer AS sent
-	 *   - bgp_read error → BGP_Stop: Connection reset by peer
+	 *   - bgp_write_notify -> BGP_Stop: Bad Peer AS sent
+	 *   - bgp_read error -> BGP_Stop: Connection reset by peer
 	 *
 	 * All of these ultimately call bgp_stop(), so we consolidate the
 	 * round-robin here.  We advance to the next entry when:
@@ -2700,7 +2700,7 @@ int bgp_event_update(struct peer_connection *connection,
 		 * BGP_Start on the next event-loop iteration to try the
 		 * next nbr_connected entry immediately.  We ignore the
 		 * FSM table's next_state because several paths (e.g.
-		 * Connect + TCP_connection_open_failed → Active) land in
+		 * Connect + TCP_connection_open_failed -> Active) land in
 		 * states where BGP_Start is a no-op.
 		 */
 		if (connection->status != Idle)
