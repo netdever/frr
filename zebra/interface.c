@@ -914,7 +914,11 @@ void if_nbr_mac_to_ipv4ll_neigh_update(struct interface *ifp,
 	 * someone unwisely accidentally deletes this entry
 	 * we can shove it back in.
 	 */
-	zif->v6_2_v4_ll_neigh_entry = !!add;
+	if (add)
+		zif->v6_2_v4_ll_neigh_entry = true;
+	else
+		zif->v6_2_v4_ll_neigh_entry =
+			(listcount(ifp->nbr_connected) > 0);
 	memcpy(&zif->v6_2_v4_ll_addr6, address, sizeof(*address));
 
 	zvrf->neigh_updates++;
