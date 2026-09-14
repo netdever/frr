@@ -1574,6 +1574,20 @@ bgp_stop_with_error(struct peer_connection *connection)
 {
 	struct peer *peer = connection->peer;
 
+	/* Multi-access round-robin: try next nbr_connected entry */
+	if (peer->conf_if && peer->ifp && peer->ifp->nbr_connected) {
+		uint32_t count = listcount(peer->ifp->nbr_connected);
+
+		if (count > 1 && peer->nbr_conn_tried < count) {
+			peer->nbr_conn_idx++;
+			peer->nbr_conn_tried++;
+			bgp_stop(connection);
+			return BGP_FSM_IMMEDIATE_RETRY;
+		}
+		peer->nbr_conn_tried = 0;
+		peer->v_start = BGP_INIT_START_TIMER;
+	}
+
 	/* Double start timer. */
 	peer->v_start *= 2;
 
@@ -1609,6 +1623,19 @@ bgp_stop_with_notify(struct peer_connection *connection, uint8_t code,
 				   peer->host, __func__);
 		peer_delete(peer);
 		return BGP_FSM_FAILURE;
+	}
+
+	/* Multi-access round-robin: try next nbr_connected entry */
+	if (peer->conf_if && peer->ifp && peer->ifp->nbr_connected) {
+		uint32_t count = listcount(peer->ifp->nbr_connected);
+
+		if (count > 1 && peer->nbr_conn_tried < count) {
+			peer->nbr_conn_idx++;
+			peer->nbr_conn_tried++;
+			bgp_stop(connection);
+			return BGP_FSM_IMMEDIATE_RETRY;
+		}
+		peer->nbr_conn_tried = 0;
 	}
 
 	/* Clear start timer value to default. */
@@ -1790,6 +1817,20 @@ bgp_connect_fail(struct peer_connection *connection)
 				   peer->host, __func__);
 		peer_delete(peer);
 		return BGP_FSM_FAILURE_AND_DELETE;
+	}
+
+	/* Multi-access round-robin: try next nbr_connected entry */
+	if (peer->conf_if && peer->ifp && peer->ifp->nbr_connected) {
+		uint32_t count = listcount(peer->ifp->nbr_connected);
+
+		if (count > 1 && peer->nbr_conn_tried < count) {
+			peer->nbr_conn_idx++;
+			peer->nbr_conn_tried++;
+			bgp_stop(connection);
+			return BGP_FSM_IMMEDIATE_RETRY;
+		}
+		peer->nbr_conn_tried = 0;
+		peer->v_start = BGP_INIT_START_TIMER;
 	}
 
 	/*
@@ -2334,6 +2375,10 @@ bgp_establish(struct peer_connection *connection)
 	if (peer->bfd_config)
 		bgp_peer_bfd_update_source(peer);
 
+	/* Multi-access: correct peer found, reset round-robin counters */
+	if (peer->conf_if)
+		peer->nbr_conn_tried = 0;
+
 	return ret;
 }
 
@@ -2634,6 +2679,20 @@ int bgp_event_update(struct peer_connection *connection,
 			connection);
 
 	switch (ret) {
+	case BGP_FSM_IMMEDIATE_RETRY:
+		/*
+		 * Multi-access round-robin: force back to Idle and fire
+		 * BGP_Start on the next event-loop iteration to try the
+		 * next nbr_connected entry immediately.  We ignore the
+		 * FSM table's next_state because several paths (e.g.
+		 * Connect + TCP_connection_open_failed → Active) land in
+		 * states where BGP_Start is a no-op.
+		 */
+		if (connection->status != Idle)
+			bgp_fsm_change_status(connection, Idle);
+		BGP_EVENT_ADD(connection, BGP_Start);
+		fsm_result = FSM_PEER_TRANSITIONED;
+		break;
 	case BGP_FSM_SUCCESS:
 	case BGP_FSM_SUCCESS_STATE_TRANSFER:
 		if (ret == BGP_FSM_SUCCESS_STATE_TRANSFER &&

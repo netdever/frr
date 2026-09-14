@@ -1779,8 +1779,11 @@ static bool _netlink_route_build_singlepath(const struct prefix *p,
 		rtmsg->rtm_flags |= RTNH_F_ONLINK;
 
 	if (is_route_v4_over_v6(rtmsg->rtm_family, nexthop->type)) {
+		struct in_addr v4ll;
+
+		ipv6ll_to_ipv4ll(&nexthop->gate.ipv6, &v4ll);
 		rtmsg->rtm_flags |= RTNH_F_ONLINK;
-		if (!nl_attr_put(nlmsg, req_size, RTA_GATEWAY, &ipv4_ll, 4))
+		if (!nl_attr_put(nlmsg, req_size, RTA_GATEWAY, &v4ll, 4))
 			return false;
 		if (!nl_attr_put32(nlmsg, req_size, RTA_OIF, nexthop->ifindex))
 			return false;
@@ -1792,8 +1795,8 @@ static bool _netlink_route_build_singlepath(const struct prefix *p,
 		}
 
 		if (IS_ZEBRA_DEBUG_KERNEL)
-			zlog_debug("%s: 5549 (%s): %pFX nexthop via %s %s if %u vrf %s(%u)",
-				   __func__, routedesc, p, ipv4_ll_buf,
+			zlog_debug("%s: 5549 (%s): %pFX nexthop via %pI4 %s if %u vrf %s(%u)",
+				   __func__, routedesc, p, &v4ll,
 				   label_buf, nexthop->ifindex,
 				   VRF_LOGNAME(vrf), nexthop->vrf_id);
 		return true;
@@ -1972,8 +1975,11 @@ static bool _netlink_route_build_multipath(const struct prefix *p,
 		rtnh->rtnh_flags |= RTNH_F_ONLINK;
 
 	if (is_route_v4_over_v6(rtmsg->rtm_family, nexthop->type)) {
+		struct in_addr v4ll;
+
+		ipv6ll_to_ipv4ll(&nexthop->gate.ipv6, &v4ll);
 		rtnh->rtnh_flags |= RTNH_F_ONLINK;
-		if (!nl_attr_put(nlmsg, req_size, RTA_GATEWAY, &ipv4_ll, 4))
+		if (!nl_attr_put(nlmsg, req_size, RTA_GATEWAY, &v4ll, 4))
 			return false;
 		rtnh->rtnh_ifindex = nexthop->ifindex;
 		if (nexthop->weight)
@@ -1986,8 +1992,8 @@ static bool _netlink_route_build_multipath(const struct prefix *p,
 
 		if (IS_ZEBRA_DEBUG_KERNEL)
 			zlog_debug(
-				"%s: 5549 (%s): %pFX nexthop via %s %s if %u vrf %s(%u)",
-				__func__, routedesc, p, ipv4_ll_buf, label_buf,
+				"%s: 5549 (%s): %pFX nexthop via %pI4 %s if %u vrf %s(%u)",
+				__func__, routedesc, p, &v4ll, label_buf,
 				nexthop->ifindex, VRF_LOGNAME(vrf),
 				nexthop->vrf_id);
 		nl_attr_rtnh_end(nlmsg, rtnh);
@@ -4198,29 +4204,46 @@ ssize_t netlink_macfdb_update_ctx(struct zebra_dplane_ctx *ctx, void *data,
 }
 
 /*
- * In the event the kernel deletes ipv4 link-local neighbor entries created for
- * 5549 support, re-install them.
+ * Handle kernel neighbor state changes for RFC 5549 per-peer 169.254.x.y
+ * entries.  On NUD_FAILED, remove the nbr_connected entry so the next RA
+ * from that peer (or a replacement) can re-establish it.  On other state
+ * changes (kernel deleted our PERMANENT entry), re-install it.
  */
 static void netlink_handle_5549(struct ndmsg *ndm, struct zebra_if *zif,
 				struct interface *ifp, struct ipaddr *ip,
 				bool handle_failed)
 {
+	struct nbr_connected *ifc = NULL;
+	struct nbr_connected *tmp;
+	struct listnode *node;
+	struct in_addr v4ll;
+	struct in6_addr *v6 = NULL;
+
 	if (ndm->ndm_family != AF_INET)
 		return;
 
-	if (!zif->v6_2_v4_ll_neigh_entry)
-		return;
+	/* Find the nbr_connected entry whose computed 169.254.x.y matches */
+	for (ALL_LIST_ELEMENTS_RO(ifp->nbr_connected, node, tmp)) {
+		v6 = &tmp->address->u.prefix6;
+		ipv6ll_to_ipv4ll(v6, &v4ll);
+		if (v4ll.s_addr == ip->ip._v4_addr.s_addr) {
+			ifc = tmp;
+			break;
+		}
+	}
 
-	if (ipv4_ll.s_addr != ip->ip._v4_addr.s_addr)
+	if (!ifc)
 		return;
 
 	if (handle_failed && ndm->ndm_state & NUD_FAILED) {
-		zlog_info("Neighbor Entry for %s has entered a failed state, not reinstalling",
-			  ifp->name);
+		zlog_info("5549 neighbor %pI4 on %s entered NUD_FAILED, removing entry",
+			  &v4ll, ifp->name);
+		nbr_connected_delete_ipv6(ifp, v6);
 		return;
 	}
 
-	if_nbr_ipv6ll_to_ipv4ll_neigh_update(ifp, &zif->v6_2_v4_ll_addr6, true);
+	/* Re-install the PERMANENT ARP entry (kernel may have deleted it) */
+	if_nbr_ipv6ll_to_ipv4ll_neigh_update(ifp, v6, true);
 }
 
 #define NUD_VALID                                                              \

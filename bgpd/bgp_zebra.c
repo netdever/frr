@@ -137,8 +137,26 @@ static void bgp_start_interface_nbrs(struct bgp *bgp, struct interface *ifp)
 	for (ALL_LIST_ELEMENTS(bgp->peer, node, nnode, peer)) {
 		if (peer->conf_if && (strcmp(peer->conf_if, ifp->name) == 0) &&
 		    !peer_established(peer->connection)) {
-			if (peer_active(peer))
-				BGP_EVENT_ADD(peer->connection, BGP_Stop);
+			/* Reset round-robin so the new entry is included */
+			peer->nbr_conn_tried = 0;
+			/*
+			 * Reset the start timer so a backed-off peer retries
+			 * immediately when a new nbr_connected entry arrives.
+			 */
+			peer->v_start = BGP_INIT_START_TIMER;
+			/*
+			 * Stop the peer synchronously rather than via
+			 * BGP_EVENT_ADD(BGP_Stop) — bgp_stop() calls
+			 * event_cancel_event_ready() which would cancel
+			 * a BGP_Start queued after it in the same batch.
+			 * By calling bgp_stop() directly, the cancellation
+			 * happens before we queue BGP_Start.
+			 */
+			if (peer_active(peer) &&
+			    peer->connection->status != Idle) {
+				bgp_stop(peer->connection);
+				bgp_fsm_change_status(peer->connection, Idle);
+			}
 			BGP_EVENT_ADD(peer->connection, BGP_Start);
 		}
 	}

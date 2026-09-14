@@ -219,6 +219,14 @@ struct zebra_if {
 	char *desc;
 };
 
+/*
+ * Derive a unique 169.254.x.y IPv4 link-local address from an IPv6
+ * link-local address.  Uses the last two octets of the MAC embedded
+ * in the EUI-64.  Used for RFC 5549 per-peer ARP entries and route
+ * nexthop substitution on multi-access segments.
+ */
+extern void ipv6ll_to_ipv4ll(const struct in6_addr *v6, struct in_addr *v4);
+
 DECLARE_HOOK(zebra_if_extra_info, (struct vty * vty, struct interface *ifp),
 	     (vty, ifp));
 
