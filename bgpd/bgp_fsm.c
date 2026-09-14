@@ -1567,23 +1567,53 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 	}
 
 	/*
-	 * Multi-access round-robin for unnumbered peers: when we sent a
-	 * Bad Peer AS notification (wrong peer on a multi-access segment),
-	 * try the next nbr_connected entry immediately instead of the
-	 * exponential backoff that bgp_write_notify() already applied.
-	 * The flag is set in bgp_write_notify() and consumed here.
+	 * Multi-access round-robin for unnumbered peers.
+	 *
+	 * On multi-access segments (shared VLANs), nbr_connected contains
+	 * entries for every RA source — other compute nodes, VMs, and the
+	 * TOR.  Failures can arrive through many FSM paths:
+	 *   - bgp_connect_fail: TCP connect refused/timeout
+	 *   - bgp_stop_with_error: NOTIFICATION received
+	 *   - bgp_stop_with_notify: hold-timer expire, etc.
+	 *   - bgp_write_notify → BGP_Stop: Bad Peer AS sent
+	 *   - bgp_read error → BGP_Stop: Connection reset by peer
+	 *
+	 * All of these ultimately call bgp_stop(), so we consolidate the
+	 * round-robin here.  We advance to the next entry when:
+	 *   (a) sent_bad_peer_as flag is set (bgp_write_notify doubled
+	 *       v_start — we must undo that), OR
+	 *   (b) the peer has never been Established on this multi-access
+	 *       segment — we're still searching for the correct peer.
+	 *
+	 * Once Established at least once (peer->established > 0), the
+	 * current entry is known-good and we fall through to normal
+	 * backoff on transient failures.
 	 */
-	if (ret == BGP_FSM_SUCCESS && peer->sent_bad_peer_as) {
-		peer->sent_bad_peer_as = false;
-		if (peer->conf_if && peer->ifp && peer->ifp->nbr_connected) {
-			uint32_t count = listcount(peer->ifp->nbr_connected);
+	if (ret == BGP_FSM_SUCCESS && peer->conf_if && peer->ifp
+	    && peer->ifp->nbr_connected) {
+		uint32_t count = listcount(peer->ifp->nbr_connected);
+		bool should_rr = false;
 
-			if (count > 1 && peer->nbr_conn_tried < count) {
-				peer->nbr_conn_idx++;
-				peer->nbr_conn_tried++;
-				peer->v_start = BGP_INIT_START_TIMER;
-				return BGP_FSM_IMMEDIATE_RETRY;
-			}
+		if (peer->sent_bad_peer_as) {
+			peer->sent_bad_peer_as = false;
+			should_rr = true;
+		} else if (count > 1 && peer->established == 0) {
+			should_rr = true;
+		}
+
+		if (should_rr && count > 1
+		    && peer->nbr_conn_tried < count) {
+			peer->nbr_conn_idx++;
+			peer->nbr_conn_tried++;
+			peer->v_start = BGP_INIT_START_TIMER;
+			zlog_info("%s [RR] bgp_stop: advance idx=%u tried=%u/%u",
+				  peer->host, peer->nbr_conn_idx,
+				  peer->nbr_conn_tried, count);
+			return BGP_FSM_IMMEDIATE_RETRY;
+		}
+		if (should_rr) {
+			zlog_info("%s [RR] bgp_stop: cycle exhausted tried=%u/%u",
+				  peer->host, peer->nbr_conn_tried, count);
 			peer->nbr_conn_tried = 0;
 			peer->v_start = BGP_INIT_START_TIMER;
 		}
@@ -1597,20 +1627,6 @@ static enum bgp_fsm_state_progress
 bgp_stop_with_error(struct peer_connection *connection)
 {
 	struct peer *peer = connection->peer;
-
-	/* Multi-access round-robin: try next nbr_connected entry */
-	if (peer->conf_if && peer->ifp && peer->ifp->nbr_connected) {
-		uint32_t count = listcount(peer->ifp->nbr_connected);
-
-		if (count > 1 && peer->nbr_conn_tried < count) {
-			peer->nbr_conn_idx++;
-			peer->nbr_conn_tried++;
-			bgp_stop(connection);
-			return BGP_FSM_IMMEDIATE_RETRY;
-		}
-		peer->nbr_conn_tried = 0;
-		peer->v_start = BGP_INIT_START_TIMER;
-	}
 
 	/* Double start timer. */
 	peer->v_start *= 2;
@@ -1647,19 +1663,6 @@ bgp_stop_with_notify(struct peer_connection *connection, uint8_t code,
 				   peer->host, __func__);
 		peer_delete(peer);
 		return BGP_FSM_FAILURE;
-	}
-
-	/* Multi-access round-robin: try next nbr_connected entry */
-	if (peer->conf_if && peer->ifp && peer->ifp->nbr_connected) {
-		uint32_t count = listcount(peer->ifp->nbr_connected);
-
-		if (count > 1 && peer->nbr_conn_tried < count) {
-			peer->nbr_conn_idx++;
-			peer->nbr_conn_tried++;
-			bgp_stop(connection);
-			return BGP_FSM_IMMEDIATE_RETRY;
-		}
-		peer->nbr_conn_tried = 0;
 	}
 
 	/* Clear start timer value to default. */
@@ -1841,20 +1844,6 @@ bgp_connect_fail(struct peer_connection *connection)
 				   peer->host, __func__);
 		peer_delete(peer);
 		return BGP_FSM_FAILURE_AND_DELETE;
-	}
-
-	/* Multi-access round-robin: try next nbr_connected entry */
-	if (peer->conf_if && peer->ifp && peer->ifp->nbr_connected) {
-		uint32_t count = listcount(peer->ifp->nbr_connected);
-
-		if (count > 1 && peer->nbr_conn_tried < count) {
-			peer->nbr_conn_idx++;
-			peer->nbr_conn_tried++;
-			bgp_stop(connection);
-			return BGP_FSM_IMMEDIATE_RETRY;
-		}
-		peer->nbr_conn_tried = 0;
-		peer->v_start = BGP_INIT_START_TIMER;
 	}
 
 	/*
