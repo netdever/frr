@@ -146,7 +146,7 @@ static void bgp_start_interface_nbrs(struct bgp *bgp, struct interface *ifp)
 			peer->v_start = BGP_INIT_START_TIMER;
 			/*
 			 * Stop the peer synchronously rather than via
-			 * BGP_EVENT_ADD(BGP_Stop) — bgp_stop() calls
+			 * BGP_EVENT_ADD(BGP_Stop) -- bgp_stop() calls
 			 * event_cancel_event_ready() which would cancel
 			 * a BGP_Start queued after it in the same batch.
 			 * By calling bgp_stop() directly, the cancellation

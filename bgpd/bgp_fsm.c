@@ -1570,7 +1570,7 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 	 * Multi-access round-robin for unnumbered peers.
 	 *
 	 * On multi-access segments (shared VLANs), nbr_connected contains
-	 * entries for every RA source — other compute nodes, VMs, and the
+	 * entries for every RA source -- other compute nodes, VMs, and the
 	 * TOR.  Failures can arrive through many FSM paths:
 	 *   - bgp_connect_fail: TCP connect refused/timeout
 	 *   - bgp_stop_with_error: NOTIFICATION received
@@ -1581,9 +1581,9 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 	 * All of these ultimately call bgp_stop(), so we consolidate the
 	 * round-robin here.  We advance to the next entry when:
 	 *   (a) sent_bad_peer_as flag is set (bgp_write_notify doubled
-	 *       v_start — we must undo that), OR
+	 *       v_start -- we must undo that), OR
 	 *   (b) the peer has never been Established on this multi-access
-	 *       segment — we're still searching for the correct peer.
+	 *       segment -- we're still searching for the correct peer.
 	 *
 	 * Once Established at least once (peer->established > 0), the
 	 * current entry is known-good and we fall through to normal
@@ -1606,14 +1606,16 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 			peer->nbr_conn_idx++;
 			peer->nbr_conn_tried++;
 			peer->v_start = BGP_INIT_START_TIMER;
-			zlog_info("%s [RR] bgp_stop: advance idx=%u tried=%u/%u",
-				  peer->host, peer->nbr_conn_idx,
-				  peer->nbr_conn_tried, count);
+			if (bgp_debug_neighbor_events(peer))
+				zlog_debug("%s [RR] bgp_stop: advance idx=%u tried=%u/%u",
+					   peer->host, peer->nbr_conn_idx,
+					   peer->nbr_conn_tried, count);
 			return BGP_FSM_IMMEDIATE_RETRY;
 		}
 		if (should_rr) {
-			zlog_info("%s [RR] bgp_stop: cycle exhausted tried=%u/%u",
-				  peer->host, peer->nbr_conn_tried, count);
+			if (bgp_debug_neighbor_events(peer))
+				zlog_debug("%s [RR] bgp_stop: cycle exhausted tried=%u/%u",
+					   peer->host, peer->nbr_conn_tried, count);
 			peer->nbr_conn_tried = 0;
 			peer->v_start = BGP_INIT_START_TIMER;
 		}
