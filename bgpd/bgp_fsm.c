@@ -1565,6 +1565,30 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 	} else {
 		bgp_peer_conf_if_to_su_update(connection);
 	}
+
+	/*
+	 * Multi-access round-robin for unnumbered peers: when we sent a
+	 * Bad Peer AS notification (wrong peer on a multi-access segment),
+	 * try the next nbr_connected entry immediately instead of the
+	 * exponential backoff that bgp_write_notify() already applied.
+	 * The flag is set in bgp_write_notify() and consumed here.
+	 */
+	if (ret == BGP_FSM_SUCCESS && peer->sent_bad_peer_as) {
+		peer->sent_bad_peer_as = false;
+		if (peer->conf_if && peer->ifp && peer->ifp->nbr_connected) {
+			uint32_t count = listcount(peer->ifp->nbr_connected);
+
+			if (count > 1 && peer->nbr_conn_tried < count) {
+				peer->nbr_conn_idx++;
+				peer->nbr_conn_tried++;
+				peer->v_start = BGP_INIT_START_TIMER;
+				return BGP_FSM_IMMEDIATE_RETRY;
+			}
+			peer->nbr_conn_tried = 0;
+			peer->v_start = BGP_INIT_START_TIMER;
+		}
+	}
+
 	return ret;
 }
 
