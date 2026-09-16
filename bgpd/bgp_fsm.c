@@ -1882,7 +1882,7 @@ bgp_connect_fail(struct peer_connection *connection)
 	}
 
 	/*
-	 * If we are doing nht for a peer that ls v6 LL based
+	 * If we are doing nht for a peer that is v6 LL based
 	 * massage the event system to make things happy
 	 */
 	bgp_nht_interface_events(peer);
@@ -2497,8 +2497,20 @@ void bgp_fsm_nht_update(struct peer_connection *connection, struct peer *peer,
 		break;
 	case Connect:
 		if (!has_valid_nexthops) {
-			EVENT_OFF(connection->t_connect);
-			BGP_EVENT_ADD(connection, TCP_fatal_error);
+			/* Only abort a real TCP connection (fd >= 0).
+			 * When fd < 0 the peer entered Connect via the
+			 * NHT-pending path in bgp_start() and there is
+			 * no socket to tear down.  Firing TCP_fatal_error
+			 * on a synthetic entry creates a feedback loop
+			 * through bgp_connect_fail -> bgp_nht_interface_events
+			 * that floods the event queue under ASAN-speed
+			 * conditions.  The pending TCP_connection_open_failed
+			 * event or the connect timer handles the transition.
+			 */
+			if (connection->fd >= 0) {
+				EVENT_OFF(connection->t_connect);
+				BGP_EVENT_ADD(connection, TCP_fatal_error);
+			}
 		}
 		break;
 	case Active:
