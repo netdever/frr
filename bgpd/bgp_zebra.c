@@ -139,6 +139,7 @@ static void bgp_start_interface_nbrs(struct bgp *bgp, struct interface *ifp)
 		    !peer_established(peer->connection)) {
 			/* Reset round-robin so the new entry is included */
 			peer->nbr_conn_tried = 0;
+			peer->nbr_conn_found = false;
 			/*
 			 * Reset the start timer so a backed-off peer retries
 			 * immediately when a new nbr_connected entry arrives.

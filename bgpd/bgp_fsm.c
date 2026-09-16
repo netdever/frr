@@ -1597,7 +1597,19 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 		if (peer->sent_bad_peer_as) {
 			peer->sent_bad_peer_as = false;
 			should_rr = true;
-		} else if (count > 1 && peer->established == 0) {
+		} else if (peer->last_reset == PEER_DOWN_WAITING_NHT) {
+			/* NHT was not yet valid -- the peer was never
+			 * actually contacted.  Don't count this as a
+			 * round-robin attempt; stay on the current address
+			 * so that once NHT resolves, the retry connects to
+			 * this address rather than skipping it.
+			 */
+			peer->v_start = BGP_INIT_START_TIMER;
+			if (bgp_debug_neighbor_events(peer))
+				zlog_debug("%s [RR] bgp_stop: NHT pending, hold idx=%u tried=%u/%u",
+					   peer->host, peer->nbr_conn_idx,
+					   peer->nbr_conn_tried, count);
+		} else if (count > 1 && !peer->nbr_conn_found) {
 			should_rr = true;
 		}
 
@@ -1938,6 +1950,13 @@ static enum bgp_fsm_state_progress bgp_start(struct peer_connection *connection)
 			return BGP_FSM_SUCCESS;
 		}
 	}
+
+	/* NHT succeeded — clear any stale WAITING_NHT so the round-robin
+	 * guard in bgp_stop only fires for genuine NHT-only failures,
+	 * not subsequent TCP failures after a real connect attempt.
+	 */
+	if (peer->last_reset == PEER_DOWN_WAITING_NHT)
+		peer->last_reset = 0;
 
 	assert(!connection->t_write);
 	assert(!connection->t_read);
@@ -2391,8 +2410,10 @@ bgp_establish(struct peer_connection *connection)
 		bgp_peer_bfd_update_source(peer);
 
 	/* Multi-access: correct peer found, reset round-robin counters */
-	if (peer->conf_if)
+	if (peer->conf_if) {
 		peer->nbr_conn_tried = 0;
+		peer->nbr_conn_found = true;
+	}
 
 	return ret;
 }

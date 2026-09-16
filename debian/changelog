@@ -1,3 +1,10 @@
+frr (10.2.6-osnet6) unstable; urgency=medium
+
+  * bgp_fsm: NHT hold guard — don't advance round-robin when NHT pending
+  * bgp_fsm: clear stale WAITING_NHT after successful NHT resolution
+
+ -- Anthony Timmins <atimmins@users.noreply.github.com>  Tue, 16 Sep 2026 09:00:00 -0500
+
 frr (10.2.6-osnet5) unstable; urgency=medium
 
   * Fix v6_2_v4_ll_neigh_entry flag for multi-entry delete
