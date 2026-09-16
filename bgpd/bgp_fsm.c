@@ -1579,20 +1579,25 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 	 *   - bgp_read error -> BGP_Stop: Connection reset by peer
 	 *
 	 * All of these ultimately call bgp_stop(), so we consolidate the
-	 * round-robin here.  We advance to the next entry when:
-	 *   (a) sent_bad_peer_as flag is set (bgp_write_notify doubled
-	 *       v_start -- we must undo that), OR
-	 *   (b) the peer has never been Established on this multi-access
-	 *       segment -- we're still searching for the correct peer.
+	 * round-robin here.  Both Bad Peer AS and transient failures (TCP
+	 * refused, connection reset) use IMMEDIATE_RETRY to cycle through
+	 * entries quickly (~10ms per wrong-peer attempt).
 	 *
-	 * Once Established at least once (peer->established > 0), the
-	 * current entry is known-good and we fall through to normal
-	 * backoff on transient failures.
+	 * NHT-not-yet-valid is handled separately: the index is held so
+	 * that once NHT resolves, the retry targets the same address
+	 * rather than skipping it.
+	 *
+	 * When dropping from Established, nbr_conn_found is cleared
+	 * (deferred until after the round-robin logic) so that if the
+	 * nbr_connected list reordered during the outage, subsequent
+	 * failures trigger a re-search.  It is also cleared by
+	 * bgp_start_interface_nbrs() when the nbr_connected list changes.
 	 */
 	if (ret == BGP_FSM_SUCCESS && peer->conf_if && peer->ifp
 	    && peer->ifp->nbr_connected) {
 		uint32_t count = listcount(peer->ifp->nbr_connected);
 		bool should_rr = false;
+		bool was_established = peer_established(connection);
 
 		if (peer->sent_bad_peer_as) {
 			peer->sent_bad_peer_as = false;
@@ -1630,6 +1635,22 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 					   peer->host, peer->nbr_conn_tried, count);
 			peer->nbr_conn_tried = 0;
 			peer->v_start = BGP_INIT_START_TIMER;
+		}
+
+		/* Dropping from Established: the nbr_connected list may
+		 * have changed while the session was up (link flap that
+		 * reorders entries).  Clear nbr_conn_found AFTER the
+		 * round-robin logic so the current (known-good) index is
+		 * kept for the first reconnect attempt.  If that attempt
+		 * fails, the next bgp_stop will see nbr_conn_found=false
+		 * and advance.
+		 *
+		 * Use a fast connect timer so the first reconnect attempt
+		 * fires in ~1s instead of the default 30s retry.
+		 */
+		if (was_established) {
+			peer->nbr_conn_found = false;
+			peer->v_connect = BGP_INIT_START_TIMER;
 		}
 	}
 

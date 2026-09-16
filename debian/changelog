@@ -1,3 +1,10 @@
+frr (10.2.6-osnet7) unstable; urgency=medium
+
+  * bgp_fsm: fix round-robin for re-established peers (nbr_conn_found flag)
+  * Round-robin now re-searches after nbr_connected list changes on link events
+
+ -- Anthony Timmins <atimmins@users.noreply.github.com>  Tue, 16 Sep 2026 18:00:00 -0500
+
 frr (10.2.6-osnet6) unstable; urgency=medium
 
   * bgp_fsm: NHT hold guard — don't advance round-robin when NHT pending
