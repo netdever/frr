@@ -1,3 +1,12 @@
+frr (10.2.6-osnet8) unstable; urgency=medium
+
+  * bgp_fsm: handle single-entry round-robin with fast timers
+  * When nbr_connected has only one entry and the connection fails (TCP RST),
+    advance nbr_conn_idx and set v_start=1s so the next RA source is targeted
+    immediately instead of waiting the default 30s retry
+
+ -- Anthony Timmins <atimmins@users.noreply.github.com>  Thu, 18 Sep 2026 01:00:00 -0500
+
 frr (10.2.6-osnet7) unstable; urgency=medium
 
   * bgp_fsm: fix round-robin for re-established peers (nbr_conn_found flag)
