@@ -1616,6 +1616,20 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 					   peer->nbr_conn_tried, count);
 		} else if (count > 1 && !peer->nbr_conn_found) {
 			should_rr = true;
+		} else if (!peer->nbr_conn_found) {
+			/* Single entry (or empty list) failed -- nothing
+			 * to rotate to, so no IMMEDIATE_RETRY.  Advance
+			 * the index so that when a new RA source arrives
+			 * and count increases, the next attempt targets
+			 * the new entry.  Set fast timers so the retry
+			 * fires in ~1s instead of the default 30s.
+			 */
+			peer->nbr_conn_idx++;
+			peer->v_start = BGP_INIT_START_TIMER;
+			if (bgp_debug_neighbor_events(peer))
+				zlog_debug("%s [RR] bgp_stop: single-entry advance idx=%u count=%u",
+					   peer->host, peer->nbr_conn_idx,
+					   count);
 		}
 
 		if (should_rr && count > 1
