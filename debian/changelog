@@ -1,3 +1,17 @@
+frr (10.7.1-osnet1) unstable; urgency=medium
+
+  * Rebase the RFC 5549 multi-access patch onto FRR 10.7.1 (FRRouting/frr#23032)
+  * zebra: new interface command "ipv6 nd multi-access"; without it FRR keeps
+    stock point-to-point behaviour (one RA neighbor, replaced by a new one)
+  * bgpd: remember neighbors that sent or were sent Bad Peer AS and skip
+    them in the multi-access round-robin, including on accepted connections
+  * bgpd: accept a connection from any multi-access neighbor between
+    attempts, so the ToR's own connects bring sessions up
+  * bgpd: NHT hold no longer depends on last_reset (fixes a retry storm
+    after a session had been Established)
+
+ -- Anthony Timmins <atimmins@users.noreply.github.com>  Fri, 16 Oct 2026 21:08:48 -0400
+
 frr (10.7.1-0) unstable; urgency=medium
 
   * New upstream release FRR 10.7.1
