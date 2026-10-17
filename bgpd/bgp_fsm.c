@@ -2376,8 +2376,11 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 	 * not start (shutdown, max-prefix) is left to the normal FSM, and so
 	 * is a passive one: it never connects out, so there is nothing to
 	 * search; bgp_accept takes a connection from any of its neighbors.
+	 * So is an accepted connection's doppelganger, including when
+	 * peer_delete() stops it again with PEER_FLAG_DELETE set.
 	 */
-	if (ret == BGP_FSM_SUCCESS && peer_nbr_conn_multi(peer) && connection->status != Clearing &&
+	if (ret == BGP_FSM_SUCCESS && peer_nbr_conn_multi(peer) && peer_is_config_node(peer) &&
+	    !CHECK_FLAG(peer->flags, PEER_FLAG_DELETE) && connection->status != Clearing &&
 	    !BGP_PEER_START_SUPPRESSED(peer) && !CHECK_FLAG(peer->flags, PEER_FLAG_PASSIVE)) {
 		uint32_t count = listcount(peer->ifp->nbr_connected);
 		bool was_established = peer_established(connection);
