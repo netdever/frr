@@ -1,3 +1,12 @@
+frr (10.7.1-osnet3) unstable; urgency=medium
+
+  * bgpd: find the unnumbered peer on multi-access segments; warn when
+    remote-as does not single it out (FRRouting/frr#23032)
+  * bgpd: expire bad-peer-AS skips after 120 seconds and drop a neighbor
+    whose OPEN announces a different AS; show badPeerAsNeighbors as objects
+
+ -- Anthony Timmins <atimmins@netdever.io>  Mon, 23 Nov 2026 12:53:48 -0500
+
 frr (10.7.1-osnet2) unstable; urgency=medium
 
   * bgpd: no multi-access round-robin restart for an accepted connection's
