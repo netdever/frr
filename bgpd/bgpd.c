@@ -1473,8 +1473,9 @@ static void peer_free(struct peer *peer)
 		work_queue_free_and_null(&peer->clear_node_queue);
 
 	XFREE(MTYPE_PEER_CONF_IF, peer->conf_if);
-	peer_nbr_conn_bad_clear(peer);
-	nbr_conn_bad_fini(&peer->nbr_conn_bad);
+	peer_nbr_conn_clear(peer);
+	nbr_conn_fini(&peer->nbr_conn_bad);
+	nbr_conn_fini(&peer->nbr_conn_matched);
 
 	XFREE(MTYPE_BGP_SOFT_VERSION, peer->soft_version);
 
@@ -1777,7 +1778,8 @@ struct peer *peer_new(struct bgp *bgp, union sockunion *su, enum connection_dire
 	peer->max_packet_size = BGP_STANDARD_MESSAGE_MAX_PACKET_SIZE;
 	peer->last_reset = PEER_DOWN_NONE;
 	peer->down_last_reset = PEER_DOWN_NONE;
-	nbr_conn_bad_init(&peer->nbr_conn_bad);
+	nbr_conn_init(&peer->nbr_conn_bad);
+	nbr_conn_init(&peer->nbr_conn_matched);
 
 	/* Set default flags. */
 	FOREACH_AFI_SAFI (afi, safi) {
@@ -1994,16 +1996,39 @@ static int bgp_peer_conf_if_to_su_update_v4(struct peer_connection *connection,
 	return 0;
 }
 
-static struct nbr_conn_bad_entry *peer_nbr_conn_bad_lookup(struct peer *peer,
-							   const struct in6_addr *addr)
+static struct nbr_conn_entry *nbr_conn_lookup(struct nbr_conn_head *head,
+					      const struct in6_addr *addr)
 {
-	struct nbr_conn_bad_entry *bad;
+	struct nbr_conn_entry *entry;
 
-	frr_each (nbr_conn_bad, &peer->nbr_conn_bad, bad)
-		if (IPV6_ADDR_SAME(&bad->addr, addr))
-			return bad;
+	frr_each (nbr_conn, head, entry)
+		if (IPV6_ADDR_SAME(&entry->addr, addr))
+			return entry;
 
 	return NULL;
+}
+
+static struct nbr_conn_entry *nbr_conn_add(struct nbr_conn_head *head, const struct in6_addr *addr)
+{
+	struct nbr_conn_entry *entry = XCALLOC(MTYPE_BGP_NBR_CONN, sizeof(*entry));
+
+	entry->addr = *addr;
+	nbr_conn_add_tail(head, entry);
+	return entry;
+}
+
+static void nbr_conn_clear(struct nbr_conn_head *head)
+{
+	struct nbr_conn_entry *entry;
+
+	while ((entry = nbr_conn_pop(head)))
+		XFREE(MTYPE_BGP_NBR_CONN, entry);
+}
+
+static struct nbr_conn_entry *peer_nbr_conn_bad_lookup(struct peer *peer,
+						       const struct in6_addr *addr)
+{
+	return nbr_conn_lookup(&peer->nbr_conn_bad, addr);
 }
 
 /*
@@ -2014,18 +2039,47 @@ static struct nbr_conn_bad_entry *peer_nbr_conn_bad_lookup(struct peer *peer,
  */
 void peer_nbr_conn_bad_add(struct peer *peer, const struct in6_addr *addr)
 {
-	struct nbr_conn_bad_entry *bad;
-
 	if (peer_nbr_conn_bad_lookup(peer, addr))
 		return;
 
-	bad = XCALLOC(MTYPE_BGP_NBR_CONN_BAD, sizeof(*bad));
-	bad->addr = *addr;
-	nbr_conn_bad_add_tail(&peer->nbr_conn_bad, bad);
+	nbr_conn_add(&peer->nbr_conn_bad, addr);
 
 	if (bgp_debug_neighbor_events(peer))
 		zlog_debug("%s [RR] %pI6 sent Bad Peer AS, skipping it (%zu skipped)", peer->host,
-			   addr, nbr_conn_bad_count(&peer->nbr_conn_bad));
+			   addr, nbr_conn_count(&peer->nbr_conn_bad));
+}
+
+/*
+ * Multi-access segments: remember each nbr_connected address that
+ * established a session with this peer, i.e. passed remote-as in both
+ * directions.  More than one means remote-as does not single out the peer
+ * on the segment: which neighbor gets the session depends on timing.  bgpd
+ * does not try other neighbors while Established, so this only sees a
+ * neighbor once the session has moved to it.
+ */
+void peer_nbr_conn_matched_add(struct peer *peer, const struct in6_addr *addr, as_t as)
+{
+	struct nbr_conn_entry *entry, *matched;
+	char buf[256] = "";
+
+	entry = nbr_conn_lookup(&peer->nbr_conn_matched, addr);
+	if (entry && entry->as == as)
+		return;
+	if (!entry)
+		entry = nbr_conn_add(&peer->nbr_conn_matched, addr);
+	entry->as = as;
+
+	if (nbr_conn_count(&peer->nbr_conn_matched) < 2)
+		return;
+
+	frr_each (nbr_conn, &peer->nbr_conn_matched, matched) {
+		csnprintfrr(buf, sizeof(buf), " %pI6 (AS ", &matched->addr);
+		csnprintfrr(buf, sizeof(buf), ASN_FORMAT(peer->bgp->asnotation), &matched->as);
+		csnprintfrr(buf, sizeof(buf), ")");
+	}
+
+	zlog_warn("Multi-access interface %s: %zu neighbors passed remote-as:%s; set a numeric remote-as to choose one",
+		  peer->conf_if, nbr_conn_count(&peer->nbr_conn_matched), buf);
 }
 
 static struct peer *peer_lookup_nbr_conn_multi_bgp(struct bgp *bgp, const union sockunion *su,
@@ -2098,23 +2152,29 @@ void peer_nbr_conn_retarget(struct peer *peer, uint32_t idx)
 			   &peer->connection->su, idx);
 }
 
-void peer_nbr_conn_bad_del(struct peer *peer, const struct in6_addr *addr)
+static void peer_nbr_conn_list_del(struct nbr_conn_head *head, const struct in6_addr *addr)
 {
-	struct nbr_conn_bad_entry *bad = peer_nbr_conn_bad_lookup(peer, addr);
+	struct nbr_conn_entry *entry = nbr_conn_lookup(head, addr);
 
-	if (!bad)
+	if (!entry)
 		return;
 
-	nbr_conn_bad_del(&peer->nbr_conn_bad, bad);
-	XFREE(MTYPE_BGP_NBR_CONN_BAD, bad);
+	nbr_conn_del(head, entry);
+	XFREE(MTYPE_BGP_NBR_CONN, entry);
 }
 
-void peer_nbr_conn_bad_clear(struct peer *peer)
+/* A neighbor left the segment: forget what it did */
+void peer_nbr_conn_del(struct peer *peer, const struct in6_addr *addr)
 {
-	struct nbr_conn_bad_entry *bad;
+	peer_nbr_conn_list_del(&peer->nbr_conn_bad, addr);
+	peer_nbr_conn_list_del(&peer->nbr_conn_matched, addr);
+}
 
-	while ((bad = nbr_conn_bad_pop(&peer->nbr_conn_bad)))
-		XFREE(MTYPE_BGP_NBR_CONN_BAD, bad);
+/* Both lists record verdicts against the current remote-as */
+void peer_nbr_conn_clear(struct peer *peer)
+{
+	nbr_conn_clear(&peer->nbr_conn_bad);
+	nbr_conn_clear(&peer->nbr_conn_matched);
 }
 
 static bool bgp_peer_conf_if_to_su_update_v6(struct peer_connection *connection,
@@ -2160,7 +2220,7 @@ static bool bgp_peer_conf_if_to_su_update_v6(struct peer_connection *connection,
 		if (bgp_debug_neighbor_events(peer))
 			zlog_debug("%s [RR] all %u entries sent Bad Peer AS, searching all again",
 				   peer->host, count);
-		peer_nbr_conn_bad_clear(peer);
+		nbr_conn_clear(&peer->nbr_conn_bad);
 		ifc_nbr = listgetdata(node); /* back at idx after the full lap */
 	} else if (i) {
 		peer->nbr_conn_idx += i;
@@ -2498,8 +2558,8 @@ void peer_as_change(struct peer *peer, as_t as, enum peer_asn_type as_type,
 {
 	enum bgp_peer_sort origtype, newtype;
 
-	/* Bad Peer AS verdicts were against the old remote-as */
-	peer_nbr_conn_bad_clear(peer);
+	/* Bad Peer AS and remote-as verdicts were against the old remote-as */
+	peer_nbr_conn_clear(peer);
 
 	/* Stop peer. */
 	if (!CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP)) {

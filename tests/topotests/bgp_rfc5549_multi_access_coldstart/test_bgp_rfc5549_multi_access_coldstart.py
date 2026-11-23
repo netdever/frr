@@ -288,10 +288,15 @@ def test_tor_outage_bad_peer_as_bounded():
 
     step("No host skips the ToR")
     for name in HOSTS:
-        bad = _peer(tgen.gears[name], "{}-eth0".format(name)).get("badPeerAsNeighbors", [])
+        p = _peer(tgen.gears[name], "{}-eth0".format(name))
+        bad = p.get("badPeerAsNeighbors", [])
         assert LINK_LOCALS["tor"] not in bad, "{} skips the ToR: {}".format(name, bad)
         hosts = {LINK_LOCALS[h] for h in HOSTS if h != name}
         assert set(bad) <= hosts, "{} skips non-hosts: {}".format(name, bad)
+        # Same-ASN hosts never pass remote-as external: only the ToR does
+        assert "multiAccessAmbiguous" not in p, "{} ambiguous: {}".format(
+            name, p.get("remoteAsMatchedNeighbors")
+        )
 
     step("Re-enable the ToR's sessions; every host re-establishes")
     tgen.gears["tor"].vtysh_cmd(

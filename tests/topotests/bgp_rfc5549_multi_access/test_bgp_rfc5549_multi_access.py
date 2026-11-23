@@ -287,6 +287,17 @@ def test_same_asn_rejected_after_recovery():
                 "Bad Peer AS invariant broken".format(peer_key)
             )
 
+    step("Only one neighbor passed remote-as on R1 and R3: not ambiguous")
+    for rname in ["r1", "r3"]:
+        iface = "{}-eth0".format(rname)
+        output = json.loads(
+            tgen.gears[rname].vtysh_cmd("show bgp neighbors {} json".format(iface))
+        )
+        p = output.get(iface, {})
+        assert "multiAccessAmbiguous" not in p, "{} ambiguous: {}".format(
+            rname, p.get("remoteAsMatchedNeighbors")
+        )
+
 
 def test_route_relearned_after_recovery():
     """After link flap recovery, routes must be re-exchanged bidirectionally."""

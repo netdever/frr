@@ -239,7 +239,7 @@ static void bgp_nbr_connected_delete(struct bgp *bgp, struct nbr_connected *ifc,
 	for (ALL_LIST_ELEMENTS(bgp->peer, node, nnode, peer)) {
 		if (peer->conf_if
 		    && (strcmp(peer->conf_if, ifc->ifp->name) == 0)) {
-			peer_nbr_conn_bad_del(peer, &ifc->address->u.prefix6);
+			peer_nbr_conn_del(peer, &ifc->address->u.prefix6);
 			/* Multi-access: a session on another neighbor stays up */
 			if (ifc->ifp->nbr_multi_access && peer_established(peer->connection) &&
 			    sockunion_family(&peer->connection->su) == AF_INET6 &&

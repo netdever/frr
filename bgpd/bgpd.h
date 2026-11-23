@@ -1562,13 +1562,17 @@ extern void bgp_peer_connection_free(struct peer_connection **connection);
 extern void bgp_peer_connection_buffers_free(struct peer_connection *connection);
 
 /* BGP neighbor structure. */
-/* Multi-access: an nbr_connected address that sent or was sent Bad Peer AS */
-PREDECL_DLIST(nbr_conn_bad);
-struct nbr_conn_bad_entry {
+/*
+ * Multi-access: an nbr_connected address that sent or was sent Bad Peer AS,
+ * or that established a session with this peer (as is then its ASN)
+ */
+PREDECL_DLIST(nbr_conn);
+struct nbr_conn_entry {
 	struct in6_addr addr;
-	struct nbr_conn_bad_item item;
+	as_t as;
+	struct nbr_conn_item item;
 };
-DECLARE_DLIST(nbr_conn_bad, struct nbr_conn_bad_entry, item);
+DECLARE_DLIST(nbr_conn, struct nbr_conn_entry, item);
 
 struct peer {
 	/* BGP structure.  */
@@ -1656,7 +1660,8 @@ struct peer {
 	bool sent_bad_peer_as;	 /* last notify was Bad Peer AS (for round-robin) */
 	bool nbr_conn_skipped;	 /* last address update skipped Bad Peer AS entries */
 	bool nbr_conn_nht_wait;	 /* last start was held waiting for NHT */
-	struct nbr_conn_bad_head nbr_conn_bad; /* addresses that answered Bad Peer AS */
+	struct nbr_conn_head nbr_conn_bad;     /* addresses that answered Bad Peer AS */
+	struct nbr_conn_head nbr_conn_matched; /* addresses that passed remote-as */
 	char *ifname;	  /* bind interface name. */
 	char *update_if;
 	union sockunion *update_source;
@@ -2678,8 +2683,9 @@ extern struct peer *peer_lookup_by_conf_if(struct bgp *bgp, const char *ifname);
 extern struct peer *peer_lookup_by_hostname(struct bgp *bgp, const char *hostname);
 extern void bgp_peer_conf_if_to_su_update(struct peer_connection *connection);
 extern void peer_nbr_conn_bad_add(struct peer *peer, const struct in6_addr *addr);
-extern void peer_nbr_conn_bad_del(struct peer *peer, const struct in6_addr *addr);
-extern void peer_nbr_conn_bad_clear(struct peer *peer);
+extern void peer_nbr_conn_matched_add(struct peer *peer, const struct in6_addr *addr, as_t as);
+extern void peer_nbr_conn_del(struct peer *peer, const struct in6_addr *addr);
+extern void peer_nbr_conn_clear(struct peer *peer);
 extern struct peer *peer_lookup_nbr_conn_multi(struct bgp *bgp, const union sockunion *su,
 					       uint32_t *idx);
 extern void peer_nbr_conn_retarget(struct peer *peer, uint32_t idx);

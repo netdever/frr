@@ -3194,6 +3194,12 @@ bgp_establish(struct peer_connection *connection)
 		peer->nbr_conn_found = true;
 	}
 
+	/* Multi-access: this neighbor passed a non-numeric remote-as */
+	if (peer->conf_if && peer->ifp && peer->ifp->nbr_multi_access &&
+	    peer->as_type != AS_SPECIFIED && sockunion_family(&connection->su) == AF_INET6 &&
+	    IN6_IS_ADDR_LINKLOCAL(&connection->su.sin6.sin6_addr))
+		peer_nbr_conn_matched_add(peer, &connection->su.sin6.sin6_addr, peer->as);
+
 	return ret;
 }
 
