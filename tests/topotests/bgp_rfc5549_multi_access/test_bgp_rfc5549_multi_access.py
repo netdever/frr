@@ -92,6 +92,14 @@ def test_bgp_convergence():
     _, result = topotest.run_and_expect(test_func, None, count=120, wait=1)
     assert result is None, "R1 did not establish with R3: {}".format(result)
 
+    step("R2 has its passive unnumbered neighbor, remote-as 65099")
+    output = json.loads(tgen.gears["r2"].vtysh_cmd("show bgp neighbors r2-eth0 json"))
+    p = output.get("r2-eth0", {})
+    assert p.get("remoteAs") == 65099, output
+    assert p.get("bgpState") != "Established", p.get("bgpState")
+    out = tgen.gears["r2"].vtysh_cmd("show running-config bgpd")
+    assert "neighbor r2-eth0 passive" in out, out
+
 
 def test_route_learned():
     """R1 should learn R3's loopback route (10.0.3.1/32) via BGP."""
@@ -433,6 +441,128 @@ def test_multi_access_off_is_stock():
     step("ipv6 nd multi-access again: R1 stays with R3")
     r1.vtysh_cmd("configure terminal\ninterface r1-eth0\nipv6 nd multi-access")
     _wait_r3_established(r1, 60)
+
+
+# Bad Peer AS entries are skipped for this long (BGP_NBR_CONN_BAD_HOLD)
+BAD_HOLD = 120
+R2_FIXED_AS = 65003
+
+
+def _link_local(router, iface):
+    out = json.loads(router.cmd("ip -6 -j addr show dev {} scope link".format(iface)))
+    return out[0]["addr_info"][0]["local"]
+
+
+def _r1_peer(r1):
+    output = json.loads(r1.vtysh_cmd("show bgp neighbors r1-eth0 json"))
+    return output.get("r1-eth0", {})
+
+
+def _wait_r2_skipped(r1, r2_ll, asn):
+    """Wait for R1 to skip R2 for Bad Peer AS; return the seconds left.
+    asn is the AS R2 announced, or None when R1 may not have seen R2's
+    OPEN (R2 rejected R1 first)."""
+
+    def _check():
+        for e in _r1_peer(r1).get("badPeerAsNeighbors", []):
+            if e["neighbor"] == r2_ll and e.get("remoteAs") in (asn, None):
+                return e
+        return None
+
+    _, entry = topotest.run_and_expect_type(_check, dict, count=60, wait=1)
+    assert isinstance(entry, dict), "R1 does not skip {}: {}".format(
+        r2_ll, _r1_peer(r1).get("badPeerAsNeighbors")
+    )
+    assert 0 < entry["expiresIn"] <= BAD_HOLD, entry
+    out = r1.vtysh_cmd("show bgp neighbors r1-eth0")
+    assert "Skipped neighbors (Bad Peer AS): {} (".format(r2_ll) in out, out
+    assert "expires in" in out, out
+    return entry["expiresIn"]
+
+
+def _wait_r1_established_with(r1, asn, seconds):
+    def _check():
+        p = _r1_peer(r1)
+        if p.get("bgpState") == "Established" and p.get("remoteAs") == asn:
+            return None
+        return "{} remoteAs={}".format(p.get("bgpState"), p.get("remoteAs"))
+
+    _, result = topotest.run_and_expect(_check, None, count=seconds, wait=1)
+    assert result is None, "R1 not Established with AS {}: {}".format(asn, result)
+
+
+def _r2_config(old_as, new_as, neighbor):
+    """Replace R2's BGP instance: AS new_as, active, its unnumbered peer
+    configured with neighbor (the rest of the command)."""
+    return (
+        "configure terminal\nno router bgp {}\nrouter bgp {}\n"
+        "no bgp ebgp-requires-policy\ntimers bgp 3 9\n"
+        "neighbor r2-eth0 interface {}\nneighbor r2-eth0 timers connect 1"
+    ).format(old_as, new_as, neighbor)
+
+
+def test_bad_peer_as_new_as_retried_at_once():
+    """R2 is misconfigured with R1's AS, so R1 sends it Bad Peer AS; then
+    its AS is fixed.  As soon as its OPEN announces the new AS, R1 forgets
+    it and the session comes up, within the hold time and with no change
+    on R1."""
+    tgen = get_topogen()
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    r1, r2, r3 = tgen.gears["r1"], tgen.gears["r2"], tgen.gears["r3"]
+    r2_ll = _link_local(r2, "r2-eth0")
+
+    step("Shut R3's session; R2 (AS 65001) accepts R1, R1 rejects R2")
+    r3.vtysh_cmd("configure terminal\nrouter bgp 65002\nneighbor r3-eth0 shutdown")
+    r2.vtysh_cmd(_r2_config(65001, 65001, "remote-as internal"))
+    # Forget entries from earlier tests: the hold time starts now
+    r1.cmd_raises("ip link set down dev r1-eth0")
+    r1.cmd_raises("ip link set up dev r1-eth0")
+    left = _wait_r2_skipped(r1, r2_ll, 65001)
+
+    step("R2 moves to AS {}; R1 establishes with it in time".format(R2_FIXED_AS))
+    start = time.time()
+    r2.vtysh_cmd(_r2_config(65001, R2_FIXED_AS, "remote-as 65001"))
+    _wait_r1_established_with(r1, R2_FIXED_AS, max(left - 5, 5))
+    assert time.time() - start < left, "Took longer than the hold time"
+    assert "badPeerAsNeighbors" not in _r1_peer(r1)
+
+
+def test_bad_peer_as_same_as_retried_after_hold():
+    """R2 rejects R1 (wrong remote-as), then its remote-as is fixed: it
+    announces the same AS as before, so R1 keeps skipping it until the
+    entry expires, then the session comes up with no change on R1."""
+    tgen = get_topogen()
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    r1, r2, r3 = tgen.gears["r1"], tgen.gears["r2"], tgen.gears["r3"]
+    r2_ll = _link_local(r2, "r2-eth0")
+
+    step("R2's remote-as no longer matches R1: it sends Bad Peer AS")
+    r2.vtysh_cmd(_r2_config(R2_FIXED_AS, R2_FIXED_AS, "remote-as 65099"))
+    left = _wait_r2_skipped(r1, r2_ll, R2_FIXED_AS)
+
+    step("Fix R2's remote-as: R1 establishes only once the entry expires")
+    start = time.time()
+    r2.vtysh_cmd(_r2_config(R2_FIXED_AS, R2_FIXED_AS, "remote-as 65001"))
+    # R2 may have refreshed the entry since left was read: up to a full hold
+    _wait_r1_established_with(r1, R2_FIXED_AS, BAD_HOLD + 60)
+    elapsed = time.time() - start
+    assert elapsed >= left - 5, "Up after {:.0f}s, {}s before expiry".format(
+        elapsed, left
+    )
+
+    step("Restore R2 and R3; R1 goes back to R3")
+    r2.vtysh_cmd(
+        "configure terminal\nno router bgp {}\nrouter bgp 65001\n"
+        "no bgp ebgp-requires-policy\n"
+        "neighbor r2-eth0 interface remote-as 65099\n"
+        "neighbor r2-eth0 passive".format(R2_FIXED_AS)
+    )
+    r3.vtysh_cmd("configure terminal\nrouter bgp 65002\nno neighbor r3-eth0 shutdown")
+    _wait_r3_established(r1, 120)
 
 
 def test_memory_leak():

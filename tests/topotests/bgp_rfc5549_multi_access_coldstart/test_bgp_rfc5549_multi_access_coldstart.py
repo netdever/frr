@@ -183,13 +183,15 @@ def _wait_all_established(tgen, seconds):
     )
 
 
-def _bad_peer_as_sent(tgen, name):
+def _notifications_sent(tgen, name, what):
     with open(os.path.join(tgen.logdir, name, "bgpd.log")) as f:
         return sum(
-            1
-            for line in f
-            if "NOTIFICATION: sent to neighbor" in line and "Bad Peer AS" in line
+            1 for line in f if "NOTIFICATION: sent to neighbor" in line and what in line
         )
+
+
+def _bad_peer_as_sent(tgen, name):
+    return _notifications_sent(tgen, name, "Bad Peer AS")
 
 
 def test_every_host_reaches_the_tor():
@@ -270,6 +272,9 @@ def test_tor_outage_bad_peer_as_bounded():
         pytest.skip(tgen.errors)
 
     before = {name: _bad_peer_as_sent(tgen, name) for name in HOSTS}
+    rejected_before = {
+        name: _notifications_sent(tgen, name, "Connection Rejected") for name in HOSTS
+    }
 
     step("Shut the ToR's sessions; hosts can only reach each other")
     tgen.gears["tor"].vtysh_cmd(
@@ -282,6 +287,16 @@ def test_tor_outage_bad_peer_as_bounded():
     # both its own connection and the one it accepted.
     limit = 2 * (NHOSTS - 1)
     sent = {name: _bad_peer_as_sent(tgen, name) - before[name] for name in HOSTS}
+    # Hosts still skipped answer a connection with Cease/Connection Rejected
+    rejected = {
+        name: _notifications_sent(tgen, name, "Connection Rejected")
+        - rejected_before[name]
+        for name in HOSTS
+    }
+    step(
+        "Sent during the outage: Bad Peer AS {} (total {}), Connection Rejected {} "
+        "(total {})".format(sent, sum(sent.values()), rejected, sum(rejected.values()))
+    )
     assert all(n <= limit for n in sent.values()), (
         "Bad Peer AS sent during the outage (limit {}): {}".format(limit, sent)
     )
@@ -289,7 +304,7 @@ def test_tor_outage_bad_peer_as_bounded():
     step("No host skips the ToR")
     for name in HOSTS:
         p = _peer(tgen.gears[name], "{}-eth0".format(name))
-        bad = p.get("badPeerAsNeighbors", [])
+        bad = [e["neighbor"] for e in p.get("badPeerAsNeighbors", [])]
         assert LINK_LOCALS["tor"] not in bad, "{} skips the ToR: {}".format(name, bad)
         hosts = {LINK_LOCALS[h] for h in HOSTS if h != name}
         assert set(bad) <= hosts, "{} skips non-hosts: {}".format(name, bad)

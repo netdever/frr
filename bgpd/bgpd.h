@@ -1528,6 +1528,9 @@ struct peer_connection {
 	union sockunion *su_local;  /* Sockunion of local address. */
 	union sockunion *su_remote; /* Sockunion of remote address. */
 
+	/* AS the neighbor's OPEN announced on this attempt, 0 until then */
+	as_t open_as;
+
 	/* For FIFO list */
 	struct peer_connection_fifo_item fifo_item;
 
@@ -1563,16 +1566,21 @@ extern void bgp_peer_connection_buffers_free(struct peer_connection *connection)
 
 /* BGP neighbor structure. */
 /*
- * Multi-access: an nbr_connected address that sent or was sent Bad Peer AS,
- * or that established a session with this peer (as is then its ASN)
+ * Multi-access: an nbr_connected address that sent or was sent Bad Peer AS
+ * (as is then the AS its OPEN announced, 0 if unknown), or that established
+ * a session with this peer (as is then its ASN)
  */
 PREDECL_DLIST(nbr_conn);
 struct nbr_conn_entry {
 	struct in6_addr addr;
 	as_t as;
+	time_t added; /* monotime, for Bad Peer AS expiry */
 	struct nbr_conn_item item;
 };
 DECLARE_DLIST(nbr_conn, struct nbr_conn_entry, item);
+
+/* Seconds a neighbor that sent or was sent Bad Peer AS is skipped */
+#define BGP_NBR_CONN_BAD_HOLD 120
 
 struct peer {
 	/* BGP structure.  */
@@ -2682,7 +2690,9 @@ extern struct peer *peer_lookup(struct bgp *bgp, union sockunion *su);
 extern struct peer *peer_lookup_by_conf_if(struct bgp *bgp, const char *ifname);
 extern struct peer *peer_lookup_by_hostname(struct bgp *bgp, const char *hostname);
 extern void bgp_peer_conf_if_to_su_update(struct peer_connection *connection);
-extern void peer_nbr_conn_bad_add(struct peer *peer, const struct in6_addr *addr);
+extern void peer_nbr_conn_bad_add(struct peer *peer, const struct in6_addr *addr, as_t as);
+extern bool peer_nbr_conn_bad_open(struct peer *peer, const struct in6_addr *addr, as_t as);
+extern time_t peer_nbr_conn_bad_expires_in(const struct nbr_conn_entry *entry);
 extern void peer_nbr_conn_matched_add(struct peer *peer, const struct in6_addr *addr, as_t as);
 extern void peer_nbr_conn_del(struct peer *peer, const struct in6_addr *addr);
 extern void peer_nbr_conn_clear(struct peer *peer);

@@ -36,10 +36,14 @@ Router Advertisement
    it. With ``multi-access``, an unnumbered BGP peer
    (``neighbor IFNAME interface``) on the interface tries each neighbor until
    one answers with an acceptable AS; neighbors that reject or are rejected
-   with Bad Peer AS are skipped from then on (``show bgp neighbors`` lists
-   them). Between attempts, the peer also accepts a connection from any of the
-   neighbors, so a neighbor that connects first (e.g. the ToR) does not wait
-   for the search. Use it where a BGP unnumbered peering shares
+   with Bad Peer AS are skipped (``show bgp neighbors`` lists them, with the
+   AS they announced and the seconds left). A skipped neighbor is tried again
+   after 120 seconds, or as soon as its OPEN announces a different AS, so a
+   neighbor whose configuration is fixed gets the session without any change
+   here. This only applies while the session is down: an Established session
+   is never affected. Between attempts, the peer also accepts a connection
+   from any of the neighbors, so a neighbor that connects first (e.g. the ToR)
+   does not wait for the search. Use it where a BGP unnumbered peering shares
    a segment with other routers, e.g. servers peering with a ToR over a shared
    VLAN.
 

@@ -2025,28 +2025,79 @@ static void nbr_conn_clear(struct nbr_conn_head *head)
 		XFREE(MTYPE_BGP_NBR_CONN, entry);
 }
 
+/* Seconds until a Bad Peer AS entry expires, 0 once it has */
+time_t peer_nbr_conn_bad_expires_in(const struct nbr_conn_entry *entry)
+{
+	time_t age = monotime(NULL) - entry->added;
+
+	return age < BGP_NBR_CONN_BAD_HOLD ? BGP_NBR_CONN_BAD_HOLD - age : 0;
+}
+
+/*
+ * Bad Peer AS entries expire after BGP_NBR_CONN_BAD_HOLD: the neighbor
+ * may have been misconfigured and fixed since.  An expired entry is
+ * dropped here, so every user sees it as absent.
+ */
 static struct nbr_conn_entry *peer_nbr_conn_bad_lookup(struct peer *peer,
 						       const struct in6_addr *addr)
 {
-	return nbr_conn_lookup(&peer->nbr_conn_bad, addr);
+	struct nbr_conn_entry *entry = nbr_conn_lookup(&peer->nbr_conn_bad, addr);
+
+	if (!entry || peer_nbr_conn_bad_expires_in(entry))
+		return entry;
+
+	if (bgp_debug_neighbor_events(peer))
+		zlog_debug("%s [RR] %pI6 Bad Peer AS expired, trying it again", peer->host, addr);
+	nbr_conn_del(&peer->nbr_conn_bad, entry);
+	XFREE(MTYPE_BGP_NBR_CONN, entry);
+	return NULL;
 }
 
 /*
  * Multi-access segments: remember the nbr_connected addresses that sent an
- * OPEN with an ASN this peer's remote-as rejects (we sent Bad Peer AS).
+ * OPEN with an ASN this peer's remote-as rejects (we sent Bad Peer AS), or
+ * that rejected ours, with the AS their OPEN announced if we got it.
  * Those speakers are not this peer, so the round-robin skips them and,
- * because the peer never targets them, their connections are not accepted.
+ * because the peer never targets them, their connections are not accepted
+ * (or, if the AS is known, only with another AS: peer_nbr_conn_bad_open).
  */
-void peer_nbr_conn_bad_add(struct peer *peer, const struct in6_addr *addr)
+void peer_nbr_conn_bad_add(struct peer *peer, const struct in6_addr *addr, as_t as)
 {
-	if (peer_nbr_conn_bad_lookup(peer, addr))
-		return;
+	struct nbr_conn_entry *entry = peer_nbr_conn_bad_lookup(peer, addr);
 
-	nbr_conn_add(&peer->nbr_conn_bad, addr);
+	if (!entry)
+		entry = nbr_conn_add(&peer->nbr_conn_bad, addr);
+	if (as)
+		entry->as = as;
+	entry->added = monotime(NULL);
 
 	if (bgp_debug_neighbor_events(peer))
-		zlog_debug("%s [RR] %pI6 sent Bad Peer AS, skipping it (%zu skipped)", peer->host,
-			   addr, nbr_conn_count(&peer->nbr_conn_bad));
+		zlog_debug("%s [RR] %pI6 (AS %u) sent Bad Peer AS, skipping it for %ds (%zu skipped)",
+			   peer->host, addr, entry->as, BGP_NBR_CONN_BAD_HOLD,
+			   nbr_conn_count(&peer->nbr_conn_bad));
+}
+
+/*
+ * Multi-access: an OPEN from a neighbor on the Bad Peer AS list.  If it
+ * announces another AS than it did then, it may have been fixed: forget
+ * the entry and let the OPEN be checked as usual.  Returns true if it is
+ * to be rejected: same AS, or unknown, until the entry expires.
+ */
+bool peer_nbr_conn_bad_open(struct peer *peer, const struct in6_addr *addr, as_t as)
+{
+	struct nbr_conn_entry *entry = peer_nbr_conn_bad_lookup(peer, addr);
+
+	if (!entry)
+		return false;
+	if (!entry->as || entry->as == as)
+		return true;
+
+	if (bgp_debug_neighbor_events(peer))
+		zlog_debug("%s [RR] %pI6 now announces AS %u, not %u: trying it again", peer->host,
+			   addr, as, entry->as);
+	nbr_conn_del(&peer->nbr_conn_bad, entry);
+	XFREE(MTYPE_BGP_NBR_CONN, entry);
+	return false;
 }
 
 /*
@@ -2087,6 +2138,7 @@ static struct peer *peer_lookup_nbr_conn_multi_bgp(struct bgp *bgp, const union 
 {
 	struct listnode *node, *nnode, *nbr_node;
 	struct nbr_connected *ifc_nbr;
+	struct nbr_conn_entry *bad;
 	struct peer *peer;
 
 	for (ALL_LIST_ELEMENTS(bgp->peer, node, nnode, peer)) {
@@ -2097,7 +2149,12 @@ static struct peer *peer_lookup_nbr_conn_multi_bgp(struct bgp *bgp, const union 
 		if ((peer->connection->status != Idle && peer->connection->status != Active) ||
 		    sockunion_family(&peer->connection->su) != AF_INET6)
 			continue;
-		if (peer_nbr_conn_bad_lookup(peer, &su->sin6.sin6_addr))
+		/*
+		 * With its AS known, its OPEN decides (peer_nbr_conn_bad_open),
+		 * unless accepting it would kill another accepted connection.
+		 */
+		bad = peer_nbr_conn_bad_lookup(peer, &su->sin6.sin6_addr);
+		if (bad && (!bad->as || peer->doppelganger))
 			continue;
 
 		*idx = 0;
@@ -2114,7 +2171,8 @@ static struct peer *peer_lookup_nbr_conn_multi_bgp(struct bgp *bgp, const union 
 /*
  * Multi-access: a connection from one of an unnumbered peer's neighbors
  * other than the one it is trying.  Find a peer that is between attempts
- * (Idle or Active) and for which the neighbor has not sent Bad Peer AS, so
+ * (Idle or Active) and for which the neighbor is not on the Bad Peer AS
+ * list, or is with a known AS (its OPEN is then checked against it), so
  * a neighbor that connects first (typically the ToR) does not wait for the
  * search.  The OPEN exchange still checks remote-as.  idx is the
  * neighbor's position in nbr_connected, for peer_nbr_conn_retarget() once
@@ -2205,9 +2263,10 @@ static bool bgp_peer_conf_if_to_su_update_v6(struct peer_connection *connection,
 		node = listnextnode(node);
 
 	/*
-	 * Skip entries that already sent Bad Peer AS.  If every entry has,
-	 * forget them and search all of them again: a remote ASN or this
-	 * peer's remote-as may have changed since.
+	 * Skip entries that sent Bad Peer AS in the last
+	 * BGP_NBR_CONN_BAD_HOLD seconds.  If every entry has, forget them and
+	 * search all of them again: a remote ASN or this peer's remote-as may
+	 * have changed since.
 	 */
 	for (i = 0; i < count; i++) {
 		ifc_nbr = listgetdata(node);

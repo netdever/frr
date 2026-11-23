@@ -2132,6 +2132,14 @@ bgp_clearing_completed(struct peer_connection *connection)
 	return rc;
 }
 
+/* Multi-access: should bgp_stop() move this peer's search on?  See there. */
+static bool bgp_nbr_conn_search_applies(struct peer *peer, struct peer_connection *connection)
+{
+	return peer_nbr_conn_multi(peer) && peer_is_config_node(peer) &&
+	       !CHECK_FLAG(peer->flags, PEER_FLAG_DELETE) && connection->status != Clearing &&
+	       !BGP_PEER_START_SUPPRESSED(peer) && !CHECK_FLAG(peer->flags, PEER_FLAG_PASSIVE);
+}
+
 /* Administrative BGP peer stop event. */
 /* May be called multiple times for the same peer */
 enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
@@ -2342,6 +2350,7 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 		peer->v_delayopen = bgp->default_delayopen;
 
 	peer->update_time = 0;
+	connection->open_as = 0;
 
 	if (!peer_is_config_node(peer) && !(CHECK_FLAG(peer->flags, PEER_FLAG_DELETE))) {
 		peer_delete(peer);
@@ -2359,9 +2368,11 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 	 * none of this runs.
 	 *
 	 * A Bad Peer AS confirms the current entry is the wrong speaker; the
-	 * address is remembered (peer_nbr_conn_bad_add) and skipped from then
-	 * on.  Transient failures (TCP refused, connection reset) also move
-	 * on.  Both retry immediately (~10ms per wrong entry).
+	 * address is remembered (peer_nbr_conn_bad_add) and skipped for
+	 * BGP_NBR_CONN_BAD_HOLD seconds, or until its OPEN announces another
+	 * AS than the one rejected.  Transient failures (TCP refused,
+	 * connection reset) also move on.  Both retry immediately (~10ms per
+	 * wrong entry).
 	 *
 	 * NHT-not-yet-valid is handled separately: the index is held so
 	 * that once NHT resolves, the retry targets the same address
@@ -2379,9 +2390,7 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 	 * So is an accepted connection's doppelganger, including when
 	 * peer_delete() stops it again with PEER_FLAG_DELETE set.
 	 */
-	if (ret == BGP_FSM_SUCCESS && peer_nbr_conn_multi(peer) && peer_is_config_node(peer) &&
-	    !CHECK_FLAG(peer->flags, PEER_FLAG_DELETE) && connection->status != Clearing &&
-	    !BGP_PEER_START_SUPPRESSED(peer) && !CHECK_FLAG(peer->flags, PEER_FLAG_PASSIVE)) {
+	if (ret == BGP_FSM_SUCCESS && bgp_nbr_conn_search_applies(peer, connection)) {
 		uint32_t count = listcount(peer->ifp->nbr_connected);
 		bool was_established = peer_established(connection);
 
